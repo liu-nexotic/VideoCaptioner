@@ -159,6 +159,30 @@ INTEL_NPU_PCI_DEVICES = {
     "B03E": "Intel(R) AI Boost (Panther Lake NPU)",
 }
 
+# Generation keys returned by npu_generation(), derived from the PCI labels
+# above (and the Linux accel names).
+_NPU_GENERATION_KEYWORDS = {
+    "meteor_lake": ("meteor lake",),
+    "arrow_lake": ("arrow lake",),
+    "lunar_lake": ("lunar lake",),
+    "panther_lake": ("panther lake",),
+}
+
+
+def npu_generation() -> str:
+    """Return the newest present NPU generation, e.g. ``"lunar_lake"``.
+
+    Empty string when no known-generation NPU is found (unknown OEM naming,
+    Linux accel names, or no NPU at all). Callers should treat unknown as
+    the most conservative behaviour.
+    """
+    for name in intel_npu_adapters():
+        lowered = name.lower()
+        for generation, keywords in _NPU_GENERATION_KEYWORDS.items():
+            if any(kw in lowered for kw in keywords):
+                return generation
+    return ""
+
 
 def intel_npu_adapters() -> List[str]:
     """Detect active Intel AI Boost NPU devices without importing OpenVINO."""
@@ -204,7 +228,20 @@ def intel_npu_adapters() -> List[str]:
                                 if matched_pci_label or any(
                                     kw in lowered for kw in ("ai boost", "npu")
                                 ):
-                                    names.append(desc or matched_pci_label)
+                                    # The FriendlyName is often a bare
+                                    # "Intel(R) AI Boost"; when the PCI ID
+                                    # told us the generation and the name
+                                    # doesn't, keep the tagged label so
+                                    # callers can tell NPU generations apart.
+                                    name_known = any(
+                                        gen in lowered
+                                        for gens in _NPU_GENERATION_KEYWORDS.values()
+                                        for gen in gens
+                                    )
+                                    if matched_pci_label and not name_known:
+                                        names.append(matched_pci_label)
+                                    else:
+                                        names.append(desc or matched_pci_label)
         except Exception:
             pass
     else:
