@@ -406,14 +406,57 @@ def test_run_worker_kills_child_stuck_after_done(tmp_path):
     assert ok, detail
     assert elapsed < 15
 
-def test_npu_uses_shorter_chunks():
+def test_npu_uses_shorter_chunks(monkeypatch):
     from videocaptioner.core.asr.openvino_asr import (
         CHUNK_SECONDS,
         NPU_CHUNK_SECONDS,
         chunk_seconds_for_device,
     )
+    from videocaptioner.core.utils import hardware
 
     assert NPU_CHUNK_SECONDS < CHUNK_SECONDS
+
+    monkeypatch.setattr(hardware, "npu_generation", lambda: "meteor_lake")
     assert chunk_seconds_for_device("NPU") == NPU_CHUNK_SECONDS
+    monkeypatch.setattr(hardware, "npu_generation", lambda: "arrow_lake")
+    assert chunk_seconds_for_device("NPU") == NPU_CHUNK_SECONDS
+    monkeypatch.setattr(hardware, "npu_generation", lambda: "panther_lake")
+    assert chunk_seconds_for_device("NPU") == NPU_CHUNK_SECONDS
+    # No stability data for unknown generations: stay conservative.
+    monkeypatch.setattr(hardware, "npu_generation", lambda: "")
+    assert chunk_seconds_for_device("NPU") == NPU_CHUNK_SECONDS
+    # Lunar Lake ran 240s chunks stably; give it the full window.
+    monkeypatch.setattr(hardware, "npu_generation", lambda: "lunar_lake")
+    assert chunk_seconds_for_device("NPU") == CHUNK_SECONDS
+    # Explicit override wins over the generation table.
+    monkeypatch.setenv("VIDEOCAPTIONER_NPU_CHUNK_SECONDS", "90")
+    assert chunk_seconds_for_device("NPU") == 90
+    monkeypatch.delenv("VIDEOCAPTIONER_NPU_CHUNK_SECONDS")
+
     assert chunk_seconds_for_device("GPU.1") == CHUNK_SECONDS
     assert chunk_seconds_for_device("CPU") == CHUNK_SECONDS
+
+
+def test_npu_generation_matches_adapter_labels(monkeypatch):
+    from videocaptioner.core.utils.hardware import npu_generation
+
+    monkeypatch.setattr(
+        "videocaptioner.core.utils.hardware.intel_npu_adapters",
+        lambda: ["Intel(R) AI Boost (Lunar Lake NPU)"],
+    )
+    assert npu_generation() == "lunar_lake"
+    monkeypatch.setattr(
+        "videocaptioner.core.utils.hardware.intel_npu_adapters",
+        lambda: ["Intel(R) AI Boost (Meteor Lake NPU)"],
+    )
+    assert npu_generation() == "meteor_lake"
+    # FriendlyName without a generation tag must not guess.
+    monkeypatch.setattr(
+        "videocaptioner.core.utils.hardware.intel_npu_adapters",
+        lambda: ["Intel(R) AI Boost"],
+    )
+    assert npu_generation() == ""
+    monkeypatch.setattr(
+        "videocaptioner.core.utils.hardware.intel_npu_adapters", lambda: []
+    )
+    assert npu_generation() == ""

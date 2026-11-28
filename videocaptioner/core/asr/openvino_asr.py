@@ -62,13 +62,31 @@ logger = setup_logger("openvino_asr")
 # generate call to keep progress reporting responsive without excessive memory.
 CHUNK_SECONDS = 240
 # The Meteor Lake NPU wedges (ZE_RESULT_ERROR_DEVICE_LOST) on a first 240s call
-# with large models; 60s matches the previously stable short-clip runs.
+# with large models; 60s matches the previously stable short-clip runs. Lunar
+# Lake (NPU 4000) ran 240s chunks stably across long sessions, so it gets the
+# full window back; unknown generations stay conservative. Override per run
+# with VIDEOCAPTIONER_NPU_CHUNK_SECONDS.
 NPU_CHUNK_SECONDS = 60
+NPU_FAST_CHUNK_GENERATIONS = ("lunar_lake",)
 
 
 def chunk_seconds_for_device(device: str) -> int:
-    """Shorter generate calls on the NPU to avoid DEVICE_LOST on long audio."""
-    return NPU_CHUNK_SECONDS if _is_npu_device(device) else CHUNK_SECONDS
+    """Shorter generate calls on the NPU to avoid DEVICE_LOST on long audio.
+
+    The safe 60s window applies to Meteor Lake/Arrow Lake (NPU 3720) and to
+    any generation we have no stability data for; newer NPUs with proven 240s
+    stability run at full length.
+    """
+    if not _is_npu_device(device):
+        return CHUNK_SECONDS
+    override = os.environ.get("VIDEOCAPTIONER_NPU_CHUNK_SECONDS", "").strip()
+    if override.isdigit() and int(override) > 0:
+        return int(override)
+    from ..utils.hardware import npu_generation
+
+    if npu_generation() in NPU_FAST_CHUNK_GENERATIONS:
+        return CHUNK_SECONDS
+    return NPU_CHUNK_SECONDS
 
 # On NPU, encoder input is statically reshaped to a single 30s window and
 # return_timestamps=False is required (#4806), so utterances are capped at 14s.

@@ -16,6 +16,7 @@ from videocaptioner.core.entities import (
     VideoCodecEnum,
     VideoEncoderEnum,
 )
+from videocaptioner.core.utils.ffmpeg_runner import run_ffmpeg
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.video_encoder import (
     build_audio_encode_args,
@@ -39,8 +40,9 @@ logger = setup_logger("subtitle.rounded")
 
 def _get_video_info(video_path: str) -> Tuple[int, int, float]:
     """获取视频分辨率和时长"""
-    result = subprocess.run(
+    result = run_ffmpeg(
         ["ffmpeg", "-i", video_path],
+        probe=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -60,6 +62,13 @@ def _get_video_info(video_path: str) -> Tuple[int, int, float]:
     if match := re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr):
         h, m, s = match.groups()
         duration = int(h) * 3600 + int(m) * 60 + float(s)
+    if duration <= 0:
+        # fragmented MP4 等容器输出 Duration: N/A；不带守卫会拼出 "-t 0"，
+        # 产出 0 帧文件且退出码为 0，用户拿到的是静默损坏的空视频
+        raise RuntimeError(
+            f"Cannot determine video duration for {video_path}; "
+            "the container may be fragmented (Duration: N/A)"
+        )
 
     return width, height, duration
 
@@ -505,7 +514,7 @@ def render_rounded_video(
                 )
                 if progress_callback:
                     progress_callback(30, f"单次合成 [{active_vcodec}]")
-                result = subprocess.run(
+                result = run_ffmpeg(
                     cmd,
                     capture_output=True,
                     text=True,
@@ -635,7 +644,7 @@ def render_rounded_video(
                     if is_last_batch:
                         logger.info("Rounded video synthesis encoder: %s", active_vcodec)
 
-                result = subprocess.run(
+                result = run_ffmpeg(
                     cmd,
                     capture_output=True,
                     text=True,
