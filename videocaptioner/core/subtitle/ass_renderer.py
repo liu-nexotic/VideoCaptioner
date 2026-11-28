@@ -16,6 +16,10 @@ from videocaptioner.core.entities import (
     VideoCodecEnum,
     VideoEncoderEnum,
 )
+from videocaptioner.core.utils.ffmpeg_runner import (
+    check_encode_deadline,
+    run_ffmpeg,
+)
 from videocaptioner.core.utils.logger import setup_logger
 from videocaptioner.core.utils.video_encoder import (
     build_audio_encode_args,
@@ -86,6 +90,20 @@ def _scale_ass_style(style_str: str, scale_factor: float) -> str:
         scaled_lines.append(line)
 
     return "\n".join(scaled_lines)
+
+
+def _escape_filter_path(path: str) -> str:
+    """路径用于 ass='...' / fontsdir='...' 滤镜参数。
+
+    反斜杠统一转成正斜杠（ffmpeg 在 Windows 上接受），再转义滤镜语法里
+    特殊的冒号与单引号——用户名带撇号（如 O'Brien）时没有这一步整个
+    滤镜串解析失败，而所有编码器回退尝试共用同一个坏滤镜串，硬字幕
+    合成会全链失败。
+    """
+    p = path.replace("\\", "/")
+    p = p.replace(":", r"\:")
+    p = p.replace("'", r"\'")
+    return p
 
 
 def render_ass_preview(
@@ -174,7 +192,7 @@ def render_ass_preview(
             if not default_bg.exists():
                 default_bg.parent.mkdir(parents=True, exist_ok=True)
                 # 生成黑色背景
-                subprocess.run(
+                run_ffmpeg(
                     [
                         "ffmpeg",
                         "-f",
@@ -185,6 +203,7 @@ def render_ass_preview(
                         "1",
                         str(default_bg),
                     ],
+                    probe=True,
                     capture_output=True,
                     creationflags=(
                         getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -199,10 +218,10 @@ def render_ass_preview(
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 处理 ASS 文件路径（Windows 兼容）
-        ass_file_escaped = processed_ass.replace("\\", "/").replace(":", r"\:")
+        ass_file_escaped = _escape_filter_path(processed_ass)
 
         # 添加内置字体目录支持
-        fonts_dir_escaped = str(FONTS_PATH).replace("\\", "/").replace(":", r"\:")
+        fonts_dir_escaped = _escape_filter_path(str(FONTS_PATH))
 
         cmd = [
             "ffmpeg",
@@ -216,8 +235,9 @@ def render_ass_preview(
             str(output_path),
         ]
 
-        result = subprocess.run(
+        result = run_ffmpeg(
             cmd,
+            probe=True,
             capture_output=True,
             creationflags=(
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -238,8 +258,9 @@ def render_ass_preview(
 
 def _get_video_resolution(video_path: str) -> Tuple[int, int]:
     """获取视频分辨率"""
-    result = subprocess.run(
+    result = run_ffmpeg(
         ["ffmpeg", "-i", video_path],
+        probe=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -317,7 +338,7 @@ def render_ass_video(
         processed_subtitle = auto_wrap_ass_file(temp_ass_path)
 
         # 转义字幕路径
-        subtitle_path_escaped = Path(processed_subtitle).as_posix().replace(":", r"\:")
+        subtitle_path_escaped = _escape_filter_path(processed_subtitle)
 
         # 解析编码格式与编码器（支持 QSV / SVT-AV1 / 软件编码器，自动回退）
         resolved = resolve_video_encoder(
@@ -331,7 +352,7 @@ def render_ass_video(
             logger.warning(resolved.fallback_reason)
 
         # 添加内置字体目录支持
-        fonts_dir_escaped = FONTS_PATH.as_posix().replace(":", r"\:")
+        fonts_dir_escaped = _escape_filter_path(str(FONTS_PATH))
 
         # 统一使用 ass 滤镜
         vf = f"ass='{subtitle_path_escaped}':fontsdir='{fonts_dir_escaped}'"
@@ -417,6 +438,7 @@ def render_ass_video(
 
                 total_duration = None
                 current_time = 0.0
+                encode_started = time.monotonic()
                 assert process.stderr is not None
 
                 while True:
@@ -426,6 +448,7 @@ def render_ass_video(
                     if not output_line:
                         continue
                     stderr_tail.append(output_line.rstrip())
+                    check_encode_deadline(process, cmd, encode_started)
                     if len(stderr_tail) > 30:
                         stderr_tail.pop(0)
                     if not progress_callback:

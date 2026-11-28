@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal, Optional
@@ -19,6 +20,7 @@ from ..subtitle.ass_renderer import render_ass_video
 from ..subtitle.ass_utils import auto_wrap_ass_file
 from ..subtitle.rounded_renderer import render_rounded_video
 from ..utils.logger import setup_logger
+from .ffmpeg_runner import check_encode_deadline, run_ffmpeg
 from ..utils.video_encoder import (
     build_audio_encode_args,
     build_video_encode_args,
@@ -105,7 +107,7 @@ def video2audio(input_file: str, output: str = "", audio_track_index: int = 0) -
     logger.debug(f"Audio conversion cmd: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(
+        result = run_ffmpeg(
             cmd,
             capture_output=True,
             check=True,
@@ -139,8 +141,9 @@ def check_cuda_available() -> bool:
     """Check if CUDA hardware acceleration is available via FFmpeg."""
     try:
         # 首先检查ffmpeg是否支持cuda
-        result = subprocess.run(
+        result = run_ffmpeg(
             ["ffmpeg", "-hwaccels"],
+            probe=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -154,8 +157,9 @@ def check_cuda_available() -> bool:
             return False
 
         # 进一步检查CUDA设备信息
-        result = subprocess.run(
+        result = run_ffmpeg(
             ["ffmpeg", "-hide_banner", "-init_hw_device", "cuda"],
+            probe=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -240,7 +244,7 @@ def add_subtitles(
             ]
             logger.debug(f"FFmpeg soft subtitle cmd: {' '.join(cmd)}")
             try:
-                subprocess.run(
+                run_ffmpeg(
                     cmd,
                     capture_output=True,
                     check=True,
@@ -331,11 +335,13 @@ def add_subtitles(
                 # 实时Reading输出并调用回调函数
                 total_duration = None
                 current_time = 0
+                encode_started = time.monotonic()
 
                 while True:
                     output_line = process.stderr.readline()
                     if not output_line or (process.poll() is not None):
                         break
+                    check_encode_deadline(process, cmd, encode_started)
                     if not progress_callback:
                         continue
 
@@ -404,8 +410,9 @@ def get_video_info(
     """
     try:
         # 执行 ffmpeg 获取视频信息
-        result = subprocess.run(
+        result = run_ffmpeg(
             ["ffmpeg", "-i", file_path],
+            probe=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -516,7 +523,7 @@ def _extract_thumbnail(video_path: str, seek_time: float, thumbnail_path: str) -
         timestamp = f"{int(seek_time // 3600):02}:{int((seek_time % 3600) // 60):02}:{seek_time % 60:06.3f}"
         Path(thumbnail_path).parent.mkdir(parents=True, exist_ok=True)
 
-        result = subprocess.run(
+        result = run_ffmpeg(
             [
                 "ffmpeg",
                 "-ss",
@@ -530,6 +537,7 @@ def _extract_thumbnail(video_path: str, seek_time: float, thumbnail_path: str) -
                 "-y",
                 Path(thumbnail_path).as_posix(),
             ],
+            probe=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
